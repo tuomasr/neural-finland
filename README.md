@@ -8,7 +8,6 @@ Historical market data can be obtained from http://nordpoolspot.com/historical-m
 Standard MLP and LSTM networks both deliver relatively good prediction accuracy.
 
 ## Dependencies
-The model is trained on a GPU by default.
 ```
 numpy
 pandas
