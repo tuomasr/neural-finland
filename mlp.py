@@ -1,77 +1,66 @@
-import theano.sandbox.cuda
-theano.sandbox.cuda.use("gpu")
 import numpy as np
-import pandas as pd
+from helper import stand_data, norm_data, norm_data_reverse
 from keras.models import Sequential  
 from keras.layers.core import Dense, Activation, Dropout
 from keras.layers.advanced_activations import LeakyReLU, PReLU
 from keras.layers.normalization import BatchNormalization
-from keras.optimizers import Adam
 
-# standardize data so that it has zero mean and unit variance
-def stand_data(x):
-    x_stand = (x-x.mean(axis=0))/x.std(axis=0)
-
-    return x_stand
-
-# normalize data to the interval [0,1]
-def norm_data(x):
-    x_normed = (x-x.min(axis=0)) / (x.max(axis=0) - x.min(axis=0))
-
-    return x_normed
-
-# normalize data to the interval [-1,1]
-def norm_data2(x):
-    x_normed = 2*(x-x.min(axis=0)) / (x.max(axis=0) - x.min(axis=0)) - 1
-
-    return x_normed
-
-def train_test_split(x, y, z, test_size=0.1):  
+def train_test_split(X, y, t, test_size=0.1):  
     """
     Split data to training and testing parts
     """
-    n_trn = int(x.shape[0]*(1-test_size))
+
+    n_trn = int(X.shape[0]*(1-test_size)) # leave the last test_size percent of the data for testing
     
-    xtrain = x[:n_trn,:]
-    xtest = x[n_trn:,:]
-    ytrain = y[:n_trn,:]
-    ytest = y[n_trn:,:]
-    ztrain = z[:n_trn,:]
-    ztest = z[n_trn:,:]
+    X_train = X[:n_trn,:]
+    X_test = X[n_trn:,:]
+    y_train = y[:n_trn]
+    y_test = y[n_trn:]
+    t_train = t[:n_trn,:] # timestamp
+    t_test = t[n_trn:,:]
 
-    # print data shapes
-    print xtrain.shape
-    print xtest.shape
-    print ytrain.shape
-    print ytest.shape
+    # report the dimensions of the train and test datasets
+    print 'X_train dimensions:', X_train.shape
+    print 'X_test dimensions:', X_test.shape
+    print 'y_train dimensions:', y_train.shape
+    print 'y_test dimensions:', y_test.shape
+    print 't_train dimensions:', t_train.shape
+    print 't_test dimensions:', t_test.shape
 
-    return (xtrain, ytrain, ztrain), (xtest, ytest, ztest)
+    return (X_train, y_train, t_train), (X_test, y_test, t_test)
 
 def main():
     # read input and output data
-    xall = np.loadtxt('input.csv', delimiter=",", skiprows=1)
-    yall = np.loadtxt('output.csv', delimiter=",", skiprows=1)
-    zall = np.loadtxt('dates.csv', delimiter=",", skiprows=1)
+    X = np.loadtxt('input.csv', delimiter=",", skiprows=1)
+    y = np.loadtxt('output.csv', delimiter=",", skiprows=1)
 
-    yall = yall.reshape(yall.shape[0],1)
-    ymax = yall.max(axis=0)
-    ymin = yall.min(axis=0)
-    ystd = yall.std(axis=0)
-    ymean = yall.mean(axis=0)
+    # the first two columns of the input data are dates and hours
+    t = X[:,0:2]
+    X = X[:,2:] # ignore dates and hours in training
 
-    xall = stand_data(xall)
-    yall = norm_data2(yall)
+    # by default y has one dimension (of size N) but it becomes easier to work with if it has dimensions Nx1
+    y = y.reshape(y.shape[0],1)
+
+    # save output statistics for scaling back to absolute values
+    y_max = y.max(axis=0)
+    y_min = y.min(axis=0)
+    y_std = y.std(axis=0)
+    y_mean = y.mean(axis=0)
+
+    # standardize and normalize data
+    X = stand_data(X)
+    y = norm_data(y, -1, 1)
 
     # split the data to train and test sets
-    (xtrain, ytrain, ztrain), (xtest, ytest, ztest) = train_test_split(xall, yall, zall)
+    (X_train, y_train, t_train), (X_test, y_test, t_test) = train_test_split(X, y, t)
 
     # model parameters
-    nb_epoch = 40
+    nb_epoch = 100
     batch_size = 200
 
     # model structure
     model = Sequential()
-    model.add(Dense(240, input_dim=xtrain.shape[1]))
+    model.add(Dense(240, input_dim=X_train.shape[1]))
     model.add(BatchNormalization())
     model.add(LeakyReLU())
     model.add(Dropout(0.5))
@@ -91,37 +80,26 @@ def main():
     model.add(LeakyReLU())
     model.add(Dropout(0.5))
 
-    model.add(Dense(1, activation="tanh"))
+    model.add(Dense(1, activation="tanh")) # output was scaled to [-1, 1]
 
     # model fitting
-    adam = Adam()
-    model.compile(loss="mae", optimizer=adam)
-    model.fit(xtrain, ytrain, batch_size=batch_size, nb_epoch=nb_epoch, show_accuracy=True, verbose=2)
+    model.compile(loss="mae", optimizer='rmsprop') # mae works better in this case
+    model.fit(X_train, y_train, batch_size=batch_size, nb_epoch=nb_epoch, show_accuracy=True, verbose=2)
 
     # model evaluation
-    score = model.evaluate(xtest, ytest, show_accuracy=True, verbose=0)
+    score = model.evaluate(X_test, y_test, show_accuracy=True, verbose=0)
     print('Test score:', score[0])
     print('Test accuracy:', score[1])
 
     # prediction
-    predicted = model.predict(xtest, verbose=1)
-    predicted = predicted.flatten()
-    predicted = predicted.reshape(predicted.shape[0],1)
-    ytest = ytest.flatten()
-    ytest = ytest.reshape(ytest.shape[0],1)
+    prediction = model.predict(X_test, verbose=1)
 
-    # scale back to absolute values
-    predicted = (predicted+1)*(ymax-ymin)*0.5 + ymin
-    ytest = (ytest+1)*(ymax-ymin)*0.5 + ymin
+    # # scale back to absolute values
+    prediction = norm_data_reverse(prediction, -1, 1, y_min, y_max)
+    y_test = norm_data_reverse(y_test, -1, 1, y_min, y_max)
 
-    # output test error
-    mse = ((predicted-ytest)**2).mean(axis=0)
-    mae = (np.abs(predicted-ytest)).mean(axis=0)
-    print('MSE', mse)
-    print('MAE', mae)
-
-    # output results
-    result = np.hstack((ztest, predicted, ytest))
-    pd.DataFrame(result).to_csv("result_mlp.csv")
+    # write the results to a file
+    result = np.concatenate((t_test, prediction, y_test), axis=1)
+    np.savetxt('result_mlp.csv', result, delimiter=',', header='date,hour,prediction,real', fmt='%1.3f', comments='')
 
 main()
